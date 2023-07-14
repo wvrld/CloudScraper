@@ -1,7 +1,8 @@
 from argparse import ArgumentParser
-from multiprocessing import Pool
+from concurrent.futures import ThreadPoolExecutor
 from termcolor import colored
 from rfc3987 import parse
+from tqdm import tqdm
 import itertools
 import requests
 import urllib3
@@ -10,10 +11,10 @@ import re
 
 
 def print_banner():
-        print('''\nCloudScraper is a tool to search through the source code of websites in order to find cloud resources belonging to a target.
-        by Jordan Potti
-        @ok_bye_now\n'''
-        )
+    print('''\nCloudScraper is a tool to search through the source code of websites in order to find cloud resources belonging to a target.
+    by Jordan Potti
+    @ok_bye_now\n'''
+    )
 
 
 def checker(url):
@@ -27,6 +28,7 @@ def checker(url):
         return False
     return False
 
+
 def gather_links(html):
     '''
     Apply to the raw HTML a regular expression to gather all the urls.
@@ -37,6 +39,7 @@ def gather_links(html):
 
     del(links_)
     return list(set(urls))
+
 
 def start(target):
     '''
@@ -56,6 +59,7 @@ def start(target):
 
     print(colored('Initial links: {}\n'.format(len(links)), color='cyan'))
     spider(links, target)
+
 
 def worker(url):
     '''
@@ -79,7 +83,7 @@ def worker(url):
 
     else:
         return []
-        
+
 
 def spider(base_urls, target):
     '''
@@ -92,41 +96,44 @@ def spider(base_urls, target):
     '''
     global target_
     target_ = parse(target)
-    p = Pool(arguments.process)
-    wannabe = [url for url in base_urls if target_['authority'] in parse(url)['authority']]
 
-    while True:
-        #retrieve all the urls returned by the workers
-        new_urls = p.map(worker, wannabe)
-        #flatten them and remove repeated ones
-        new_urls = list(set(itertools.chain(*new_urls)))
-        wannabe = []
-        i = 0
+    with ThreadPoolExecutor(max_workers=arguments.process) as executor:
+        wannabe = [url for url in base_urls if target_['authority'] in parse(url)['authority']]
 
-        #if new_urls is empty meaning no more urls are being discovered, exit the loop
-        if new_urls == []:
-            break
-        
-        else:
-            for url in new_urls:
-                if url not in base_urls:
-                    '''
-                    For each new url, check if it hasn't been crawled. If it's 
-                    indeed new and contains the target domain it gets appended to 
-                    the wannabe list so in the next iteration it will be crawled. 
-                    '''
-                    i += 1
-                    if target_['authority'] in parse(url)['authority']:
-                        wannabe.append(url)
-                    base_urls.append(url)
-        
-        print(colored('\nNew urls appended: {}\n'.format(i), 'green', attrs=['bold']))
+        while True:
+            # Add progress bar with tqdm
+            pbar = tqdm(total=len(wannabe), desc='Processing URLs', ncols=80)
+            #retrieve all the urls returned by the workers
+            new_urls = list(executor.map(worker, wannabe))
+            # Update the progress bar
+            pbar.update(len(new_urls))
+            #flatten them and remove repeated ones
+            new_urls = list(set(itertools.chain(*new_urls)))
+            wannabe = []
+            i = 0
 
-    p.close()
-    p.join()
+            #if new_urls is empty meaning no more urls are being discovered, exit the loop
+            if not new_urls:
+                break
+            
+            else:
+                for url in new_urls:
+                    if url not in base_urls:
+                        '''
+                        For each new url, check if it hasn't been crawled. If it's 
+                        indeed new and contains the target domain it gets appended to 
+                        the wannabe list so in the next iteration it will be crawled. 
+                        '''
+                        i += 1
+                        if target_['authority'] in parse(url)['authority']:
+                            wannabe.append(url)
+                        base_urls.append(url)
+            
+            print(colored('\nNew urls appended: {}\n'.format(i), 'green', attrs=['bold']))
+            pbar.close()
 
-    #once all the links for the given depth have been analyzed, execute the parser
-    parser(base_urls)
+        #once all the links for the given depth have been analyzed, execute the parser
+        parser(base_urls)
 
 
 def parser(links):
@@ -135,7 +142,6 @@ def parser(links):
         match with the list of cloud domains we are interested in.
     '''
     print(colored('Parsing results...', 'cyan', attrs=['bold']))
-    cloud_domains = ['amazonaws.com', 'digitaloceanspaces.com', 'windows.net', 'storage.googleapis.com', 'aliyuncs.com']
     matches = []
 
     [[matches.append(link) for link in links if cloud_domain in link] for cloud_domain in cloud_domains]
@@ -157,13 +163,15 @@ def args():
     parser.add_argument("-l", dest="targetlist", required=False, help="Location of text file of Line Delimited targets") 
     parser.add_argument("-v", action="store_true", default=False, required=False, help="Verbose output")
     parser.add_argument("-p", dest="process", required=False, default=2, type=int, help="Number of processes to run")
+    parser.add_argument("-k", dest="keywords", required=False, default=[], nargs='+', help="Keywords to search for")
+    parser.add_argument("--keywords-file", dest="keywords_file", required=False, help="File with keywords to search for, one per line")
     parser.add_argument("--no-verify", action="store_false", default=True, required=False, help="Skip TLS verification")
     if len(sys.argv) == 1:
         parser.error("No arguments given.")
         parser.print_usage
         sys.exit()
 
-    #ouput parsed arguments into a usable object
+    #output parsed arguments into a usable object
     return parser.parse_args()
 
 
@@ -175,7 +183,12 @@ def cleaner(url):
 
 
 def main():
-
+    global cloud_domains
+    if arguments.keywords:
+        cloud_domains = arguments.keywords
+    if arguments.keywords_file:
+        with open(arguments.keywords_file, 'r') as kf:
+            cloud_domains = [line.strip() for line in kf.readlines()]
     if arguments.targetlist:
         with open (arguments.targetlist, 'r') as target_list:
             [start(cleaner(line)) for line in target_list]
@@ -191,6 +204,8 @@ arguments = args()
 # If we passed --no-verify then we likely don't care about insecure request warnings.
 if arguments.no_verify:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+cloud_domains = ['amazonaws.com', 'digitaloceanspaces.com', 'windows.net', 'storage.googleapis.com', 'aliyuncs.com']
 
 if __name__ == '__main__':
     print_banner()
